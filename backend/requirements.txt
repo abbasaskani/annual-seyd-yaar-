@@ -1,0 +1,8 @@
+numpy>=1.24
+shapely>=2.0
+python-dateutil>=2.8
+python-dotenv>=1.0
+requests>=2.31
+copernicusmarine>=2.4.0
+xarray>=2024.10.0
+netCDF4>=1.7.1

@@ -1,0 +1,16 @@
+{
+  "name": "Seyd-Yaar",
+  "short_name": "SeydYaar",
+  "start_url": "./app.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#081526",
+  "theme_color": "#081526",
+  "icons": [
+    {
+      "src": "./assets/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

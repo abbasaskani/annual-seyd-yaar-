@@ -1,0 +1,74 @@
+[
+  {
+    "label": "Yemen / Socotra (UTC+03:00)",
+    "value": "Asia/Aden",
+    "utc_offset": "+03:00",
+    "group": "Arabian Sea / Western Indian Ocean"
+  },
+  {
+    "label": "Comoros (UTC+03:00)",
+    "value": "Indian/Comoro",
+    "utc_offset": "+03:00",
+    "group": "Western Indian Ocean"
+  },
+  {
+    "label": "Mayotte (UTC+03:00)",
+    "value": "Indian/Mayotte",
+    "utc_offset": "+03:00",
+    "group": "Western Indian Ocean"
+  },
+  {
+    "label": "Madagascar (UTC+03:00)",
+    "value": "Indian/Antananarivo",
+    "utc_offset": "+03:00",
+    "group": "Western Indian Ocean"
+  },
+  {
+    "label": "Seychelles / Mahe (UTC+04:00)",
+    "value": "Indian/Mahe",
+    "utc_offset": "+04:00",
+    "group": "Western Indian Ocean"
+  },
+  {
+    "label": "Mauritius (UTC+04:00)",
+    "value": "Indian/Mauritius",
+    "utc_offset": "+04:00",
+    "group": "Western Indian Ocean"
+  },
+  {
+    "label": "Reunion (UTC+04:00)",
+    "value": "Indian/Reunion",
+    "utc_offset": "+04:00",
+    "group": "Western Indian Ocean"
+  },
+  {
+    "label": "UAE / Dubai (UTC+04:00)",
+    "value": "Asia/Dubai",
+    "utc_offset": "+04:00",
+    "group": "Arabian Sea"
+  },
+  {
+    "label": "Oman / Muscat (UTC+04:00)",
+    "value": "Asia/Muscat",
+    "utc_offset": "+04:00",
+    "group": "Arabian Sea"
+  },
+  {
+    "label": "Maldives (UTC+05:00)",
+    "value": "Indian/Maldives",
+    "utc_offset": "+05:00",
+    "group": "Central Indian Ocean / Arabian Sea"
+  },
+  {
+    "label": "Pakistan / Karachi (UTC+05:00)",
+    "value": "Asia/Karachi",
+    "utc_offset": "+05:00",
+    "group": "Arabian Sea"
+  },
+  {
+    "label": "Chagos / BIOT (UTC+06:00)",
+    "value": "Indian/Chagos",
+    "utc_offset": "+06:00",
+    "group": "Central Indian Ocean"
+  }
+]
