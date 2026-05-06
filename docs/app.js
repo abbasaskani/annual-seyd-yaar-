@@ -2132,12 +2132,18 @@ async function loadSpeciesMetaAndInit(){
 // load server mask
   const maskTpl = state.meta?.paths?.mask || state.meta?.paths?.per_time?.mask;
   const maskTid = state.meta?.time_ids?.[0] || state.runMeta?.time_ids?.[0] || state.latestMeta?.available_time_ids?.[0];
-  const maskRel = maskTpl ? (state.meta?.paths?.mask ? maskTpl : maskTpl.replace("{time}", maskTid).replace("{time_id}", maskTid)) : null;
+  const makeAllValidMask = () => new Uint8Array((state.grid.width||1)*(state.grid.height||1)).fill(1);
+  const maskRel = maskTpl ? resolvePerTimePath(maskTpl, maskTid) : null;
   if(maskRel){
-    const maskUrl = buildLatestUrl(state.runPath, maskRel);
-    state.baseMask = await fetchBin(maskUrl, "u8");
+    const maskUrl = buildLatestUrl(maskRel);
+    try {
+      state.baseMask = await fetchBin(maskUrl, "u8");
+    } catch (err) {
+      console.warn("Mask fetch failed; using all-valid fallback mask", { maskUrl, err });
+      state.baseMask = makeAllValidMask();
+    }
   } else {
-    state.baseMask = new Uint8Array((state.grid.width||1)*(state.grid.height||1)).fill(1);
+    state.baseMask = makeAllValidMask();
   }
 
   // effective analysis mask = server mask × user AOI
