@@ -1,5 +1,5 @@
 /* Seyd‑Yaar Service Worker — cache static assets, but ALWAYS refresh dynamic data (latest/ + runs/) */
-const CACHE = "seydyaar-v0.5.0"; // bump this when static UI files change
+const CACHE = "seydyaar-v0.5.1-ui-pathfix"; // bump this when static UI files change
 
 // Only STATIC assets here.
 // Do NOT pre-cache latest/* or runs/*
