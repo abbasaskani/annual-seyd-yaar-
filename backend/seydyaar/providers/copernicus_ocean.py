@@ -143,6 +143,15 @@ def _resample_2d_nearest(values: np.ndarray, src_lats: np.ndarray, src_lons: np.
     return data_sorted[np.ix_(lat_idx, lon_idx)].astype(np.float32)
 
 
+
+
+def _normalize_target_time_for_coord(coord_values, target_time_utc: dt.datetime):
+    arr = np.asarray(coord_values)
+    if np.issubdtype(arr.dtype, np.datetime64):
+        naive_utc = target_time_utc.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return np.datetime64(naive_utc, "ns")
+    return target_time_utc
+
 def _select_variable_2d(ds, var_name: str, *, target_time_utc: dt.datetime, depth_target_m: float | None):
     if var_name not in ds:
         raise OceanDataError(f"Variable '{var_name}' not found in dataset variables={list(ds.data_vars)}")
@@ -154,15 +163,18 @@ def _select_variable_2d(ds, var_name: str, *, target_time_utc: dt.datetime, dept
     time_name = _time_coord_name(da)
     if time_name and time_name in da.coords:
         try:
-            da = da.sel({time_name: target_time_utc}, method="nearest")
-            actual_time_raw = da.coords[time_name].values.item()
+            sel_target = _normalize_target_time_for_coord(da.coords[time_name].values, target_time_utc)
+            da = da.sel({time_name: sel_target}, method="nearest")
+            actual_time_raw = np.asarray(da.coords[time_name].values).squeeze()
             actual_time = np.datetime64(actual_time_raw).astype("datetime64[ns]").tolist()
             if isinstance(actual_time, dt.datetime):
                 if actual_time.tzinfo is None:
                     actual_time = actual_time.replace(tzinfo=dt.timezone.utc)
                 actual_time_utc = actual_time.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         except Exception as exc:
-            raise OceanDataError(f"Could not select nearest time for variable '{var_name}'") from exc
+            raise OceanDataError(
+                f"Could not select nearest time for variable '{var_name}' (coord dtype={np.asarray(da.coords[time_name].values).dtype})"
+            ) from exc
 
     depth_name = _depth_coord_name(da)
     if depth_name and depth_name in da.coords and depth_target_m is not None:
