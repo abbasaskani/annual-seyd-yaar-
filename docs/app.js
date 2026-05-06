@@ -374,6 +374,35 @@ async function fetchBin(url, dtype){
   return out;
 }
 
+function normalizeRepoRelPath(path){
+  let p = String(path || "").trim();
+  if(!p) return "";
+  p = p.replace(/^\.?\//, "");
+  p = p.replace(/^docs\//, "");
+  p = p.replace(/^latest\//, "");
+  p = p.replace(/^\/+/, "");
+  return p;
+}
+
+function buildLatestUrl(...parts){
+  const cleaned = parts
+    .flat()
+    .map((x) => normalizeRepoRelPath(x))
+    .filter(Boolean);
+  const joined = cleaned.join('/').replace(/\/+/g, '/');
+  return joined ? `latest/${joined}` : 'latest';
+}
+
+function resolvePerTimePath(tpl, timeId){
+  const tid = String(timeId || '');
+  let rel = String(tpl || '');
+  rel = rel.replaceAll('{time}', tid).replaceAll('{time_id}', tid);
+  rel = normalizeRepoRelPath(rel);
+  const rp = normalizeRepoRelPath(state.runPath);
+  if(rp && (rel === rp || rel.startsWith(rp + '/'))) return rel;
+  return [rp, rel].filter(Boolean).join('/');
+}
+
 
 function pointInRing(lon, lat, ring){
   // ray casting; ring: [[lon,lat],...]
@@ -719,7 +748,7 @@ async function getValueAtIndexForKey(timeIso, key, idx){
   if(!arr){
     const tpl = state.meta?.paths?.per_time?.[key];
     if(!tpl) return null;
-    const url = `latest/${state.runPath}/${tpl.replace("{time}", tid).replace("{time_id}", tid)}`;
+    const url = buildLatestUrl(resolvePerTimePath(tpl, tid));
     arr = await fetchBin(url, "f32");
     state._binCache.set(cacheKey, arr);
     // simple cache size limit
@@ -765,7 +794,7 @@ async function showPointPopup(lat, lon, metaInfo){
         if(!tpl) continue;
         try{
           if(!state._layerCache[timeId][key]){
-            const url = `latest/${state.runPath}/${tpl.replace("{time}", timeId).replace("{time_id}", timeId)}`;
+            const url = buildLatestUrl(resolvePerTimePath(tpl, timeId));
             state._layerCache[timeId][key] = await fetchBin(url, "f32");
           }
           const a = state._layerCache[timeId][key];
@@ -1305,7 +1334,7 @@ function mergeAndSortTimeIds(a,b){
 async function scanTimeIdsFromTimesDir(){
   // Works on local python http.server (directory listing). On GitHub Pages it may return 404/HTML without listing.
   try{
-    const base = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/times/`;
+    const base = buildLatestUrl(state.runPath, `variants/${state.variant}/species/${state.species}/times/`);
     const r = await fetch(base, {cache:"no-store"});
     if(!(r.status===200 || r.status===304)) return [];
     const html = await r.text();
@@ -1348,7 +1377,7 @@ async function filterTimeIdsByExistingLayer(timeIds){
     for(let i=0;i<timeIds.length;i+=CONC){
       const chunk = timeIds.slice(i,i+CONC);
       const res = await Promise.all(chunk.map(async tid=>{
-        const url = `latest/${state.runPath}/${tpl.replace("{time}", tid).replace("{time_id}", tid)}`;
+        const url = buildLatestUrl(resolvePerTimePath(tpl, tid));
         return (await exists(url)) ? tid : null;
       }));
       for(const x of res) if(x) good.push(x);
@@ -1856,7 +1885,7 @@ async function loadCovAtPoints(timeIso, points){
   const dy = (latMax - latMin) / (H-1);
 
   async function loadArr(key, dtype){
-    const url = `latest/${state.runPath}/${state.meta.paths.per_time[key].replace("{time}", timeId).replace("{time_id}", timeId)}`;
+    const url = buildLatestUrl(resolvePerTimePath(state.meta.paths.per_time[key], timeId));
     return fetchBin(url, dtype);
   }
   const [sst, chl, cur, wav] = await Promise.all([
@@ -1887,7 +1916,7 @@ async function getConfAggregated(timeIsos){
   }
   const promises = timeIsos.map(t=>{
     const tid = timeIdFromIso(t);
-    const url = `latest/${state.runPath}/${per.conf.replace("{time}", tid).replace("{time_id}", tid)}`;
+    const url = buildLatestUrl(resolvePerTimePath(per.conf, tid));
     return fetchBin(url,"f32");
   });
   const arrs = await Promise.all(promises);
@@ -1896,7 +1925,7 @@ async function getConfAggregated(timeIsos){
   if(state.qcOn && per.qc_chl){
     const qcArrs = await Promise.all(timeIsos.map(async t=>{
       const tid = timeIdFromIso(t);
-      const url = `latest/${state.runPath}/${per.qc_chl.replace("{time}", tid).replace("{time_id}", tid)}`;
+      const url = buildLatestUrl(resolvePerTimePath(per.qc_chl, tid));
       return fetchBin(url,"u8");
     }));
     const qcMean = new Float32Array(conf.length);
@@ -1976,7 +2005,7 @@ async function computeAndRender(){
       console.warn("Missing layer template:", key);
       return new Float32Array(W*H).fill(NaN);
     }
-    const url = `latest/${state.runPath}/${tpl.replace("{time}", tid).replace("{time_id}", tid)}`;
+    const url = buildLatestUrl(resolvePerTimePath(tpl, tid));
     const dtype = (tpl.endsWith(".u8") || key === "ops" || key === "mask") ? "u8" : "f32";
     return fetchBin(url, dtype);
   }
@@ -2060,7 +2089,7 @@ async function refreshMeta(){
 
 async function refreshVariants(){
   const run = state.index.runs.find(r=>r.run_id===state.runId) || state.index.runs[0];
-  state.runPath = run.path || state.latestMeta?.run_path;
+  state.runPath = normalizeRepoRelPath(run.path || run.run_path || state.latestMeta?.run_path || state.latestMeta?.path || `runs/${state.runId}`);
   const variantSelect = $("variantSelect");
   variantSelect.innerHTML = "";
   const variants = run.variants || [state.latestMeta?.variant].filter(Boolean);
@@ -2084,10 +2113,10 @@ async function refreshVariants(){
 async function loadSpeciesMetaAndInit(){
   state.species = $("speciesSelect").value;
   // species meta path:
-  const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
+  const url = buildLatestUrl(state.runPath, `variants/${state.variant}/species/${state.species}/meta.json`);
   state.meta = await fetchJson(url);
   // run-level meta for availability reporting + deduped time catalog
-  state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=> state.latestMeta || null);
+  state.runMeta = await fetchJson(buildLatestUrl(state.runPath, `meta.json`)).catch(()=> state.latestMeta || null);
   const bbox = state.runMeta?.bbox || state.latestMeta?.bbox || state.meta?.bbox || null;
   state.grid = Object.assign({}, state.runMeta?.grid || state.latestMeta?.grid || state.meta?.grid || {});
   if(bbox && bbox.length===4){
@@ -2105,7 +2134,7 @@ async function loadSpeciesMetaAndInit(){
   const maskTid = state.meta?.time_ids?.[0] || state.runMeta?.time_ids?.[0] || state.latestMeta?.available_time_ids?.[0];
   const maskRel = maskTpl ? (state.meta?.paths?.mask ? maskTpl : maskTpl.replace("{time}", maskTid).replace("{time_id}", maskTid)) : null;
   if(maskRel){
-    const maskUrl = `latest/${state.runPath}/${maskRel}`;
+    const maskUrl = buildLatestUrl(state.runPath, maskRel);
     state.baseMask = await fetchBin(maskUrl, "u8");
   } else {
     state.baseMask = new Uint8Array((state.grid.width||1)*(state.grid.height||1)).fill(1);
