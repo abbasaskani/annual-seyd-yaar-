@@ -38,3 +38,10 @@
 ## Dependency updates
 
 - Added `netCDF4` for robust local opening of cached NetCDF subsets.
+
+
+## 2026-05-05 native-grid backend fix
+- Removed hard dependency on manual --grid / grid_wh for seasonal and daily runs.
+- Bundle now derives width/height from the native Copernicus reference dataset over the AOI.
+- GitHub Actions seasonal workflow no longer asks for Grid size or passes --grid.
+- Deprecated hidden --grid CLI arg is ignored for backward compatibility.

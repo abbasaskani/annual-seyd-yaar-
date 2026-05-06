@@ -27,7 +27,7 @@ def main() -> None:
     p_daily.add_argument('--future-days', type=int, default=4)
     p_daily.add_argument('--step-hours', type=int, default=6)
     p_daily.add_argument('--out', default=str(Path('docs') / 'latest'))
-    p_daily.add_argument('--grid', default='220x220')
+    p_daily.add_argument('--grid', default=None, help=argparse.SUPPRESS)
 
     p_seasonal = sub.add_parser('run-seasonal', help='Run real recurring seasonal snapshots into docs/latest')
     p_seasonal.add_argument('--start-year', type=int, required=True)
@@ -39,9 +39,9 @@ def main() -> None:
     p_seasonal.add_argument('--timezone', default='Indian/Mahe')
     p_seasonal.add_argument('--snapshot-local-hour', type=int, default=18)
     p_seasonal.add_argument('--out', default=str(Path('docs') / 'latest'))
-    p_seasonal.add_argument('--grid', default='220x220')
     p_seasonal.add_argument('--variant', default='seasonal')
     p_seasonal.add_argument('--run-id', default='seasonal-manual')
+    p_seasonal.add_argument('--grid', default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
     cfg_dir = Path('backend/config')
@@ -58,7 +58,6 @@ def main() -> None:
             past_days=int(args.past_days),
             future_days=int(args.future_days),
             step_hours=int(args.step_hours),
-            grid_wh=args.grid,
         )
     elif args.cmd == 'run-seasonal':
         from seydyaar.pipeline.run_seasonal import run_seasonal
@@ -74,7 +73,6 @@ def main() -> None:
             step_unit=args.step_unit,
             timezone_name=args.timezone,
             snapshot_local_hour=args.snapshot_local_hour,
-            grid_wh=args.grid,
             variant=args.variant,
             run_id=args.run_id,
         )

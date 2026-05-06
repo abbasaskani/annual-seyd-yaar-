@@ -15,7 +15,6 @@ def run_daily(
     past_days: int = 7,
     future_days: int = 4,
     step_hours: int = 6,
-    grid_wh: str = '220x220',
     variant: str = 'auto',
     gear_depths_m: List[int] | None = None,
 ) -> str:
@@ -28,7 +27,6 @@ def run_daily(
         variant=variant,
         aoi_geojson=aoi_geojson,
         species_profiles=species_profiles,
-        grid_wh=grid_wh,
         time_source=time_source,
         temporal_spec={
             'mode': 'operational',

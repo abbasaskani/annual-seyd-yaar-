@@ -25,7 +25,6 @@ def run_seasonal(
     step_unit: str,
     timezone_name: str,
     snapshot_local_hour: int = 18,
-    grid_wh: str = '220x220',
     variant: str = 'seasonal',
     run_id: str = 'seasonal-manual',
 ) -> str:
@@ -63,7 +62,6 @@ def run_seasonal(
         variant=variant,
         aoi_geojson=aoi_geojson,
         species_profiles=species_profiles,
-        grid_wh=grid_wh,
         time_source=time_source,
         temporal_spec=temporal_spec,
     )

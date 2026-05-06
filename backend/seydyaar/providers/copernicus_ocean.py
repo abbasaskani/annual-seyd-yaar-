@@ -255,6 +255,81 @@ def _open_cached_dataset(path: Path):
         raise OceanDataError(f"Could not open cached NetCDF subset: {path}") from exc
 
 
+def resolve_reference_grid(
+    *,
+    aoi_geojson: dict,
+    target_time_utc: dt.datetime,
+    datasets_cfg: Mapping[str, object] | None = None,
+    preferred_logical_name: str | None = None,
+) -> tuple[GridSpec, dict[str, object]]:
+    cfg = dict(datasets_cfg or load_datasets_config().get("cmems", {}))
+    if not cfg:
+        raise OceanDataError("No Copernicus datasets were configured in backend/config/datasets.json")
+
+    logical_name = preferred_logical_name or str(cfg.get("reference_grid_from") or "sst")
+    item = cfg.get(logical_name)
+    if not item or not isinstance(item, Mapping):
+        raise OceanDataError(f"Missing dataset config for reference grid layer '{logical_name}'")
+
+    variables = list(item.get("variables") or ([item["variable"]] if item.get("variable") else []))
+    if not variables:
+        raise OceanDataError(f"Dataset config for reference grid layer '{logical_name}' has no variable(s)")
+
+    bbox = bbox_from_geojson(aoi_geojson)
+    dataset_id = str(item["dataset_id"])
+    depth_target_m = item.get("depth_target_m")
+    cache_path, cache_hit, retry_attempts_used = _download_subset_to_cache(
+        dataset_id=dataset_id,
+        variables=variables,
+        bbox=bbox,
+        target_time_utc=target_time_utc,
+        depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
+    )
+    ds = _open_cached_dataset(cache_path)
+    try:
+        var_name = variables[0]
+        da, lat_name, lon_name, actual_time_utc, actual_depth_m = _select_variable_2d(
+            ds,
+            var_name,
+            target_time_utc=target_time_utc,
+            depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
+        )
+        src_lats = np.asarray(da[lat_name].values, dtype=np.float64)
+        src_lons = np.asarray(da[lon_name].values, dtype=np.float64)
+        if src_lats.ndim != 1 or src_lons.ndim != 1:
+            raise OceanDataError(
+                f"Reference grid layer '{logical_name}' must expose 1D lat/lon coordinates; got lat_ndim={src_lats.ndim}, lon_ndim={src_lons.ndim}"
+            )
+        src_lons = _normalize_longitudes(src_lons, np.asarray([bbox[0], bbox[2]], dtype=np.float64))
+        grid = GridSpec(
+            lon_min=float(np.nanmin(src_lons)),
+            lon_max=float(np.nanmax(src_lons)),
+            lat_min=float(np.nanmin(src_lats)),
+            lat_max=float(np.nanmax(src_lats)),
+            width=int(src_lons.size),
+            height=int(src_lats.size),
+        )
+        provenance = {
+            "logical_name": logical_name,
+            "dataset_id": dataset_id,
+            "variable": var_name,
+            "actual_time_utc": actual_time_utc,
+            "actual_depth_m": actual_depth_m,
+            "cache_path": str(cache_path).replace("\\", "/"),
+            "cache_hit": bool(cache_hit),
+            "retry_attempts_used": int(retry_attempts_used),
+            "width": int(src_lons.size),
+            "height": int(src_lats.size),
+            "bbox": [float(np.nanmin(src_lons)), float(np.nanmin(src_lats)), float(np.nanmax(src_lons)), float(np.nanmax(src_lats))],
+        }
+        return grid, provenance
+    finally:
+        try:
+            ds.close()
+        except Exception:
+            pass
+
+
 def fetch_environment_fields(
     *,
     aoi_geojson: dict,

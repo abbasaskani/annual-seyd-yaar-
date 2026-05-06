@@ -8,7 +8,12 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from ..providers.copernicus_ocean import OceanDataError, fetch_environment_fields, load_datasets_config
+from ..providers.copernicus_ocean import (
+    OceanDataError,
+    fetch_environment_fields,
+    load_datasets_config,
+    resolve_reference_grid,
+)
 from ..utils_geo import GridSpec, bbox_from_geojson, mask_from_geojson
 from ..utils_time import iso_from_time_id
 from .io import minify_json_for_web, write_bin_f32, write_bin_u8, write_json
@@ -21,7 +26,6 @@ class RunContext:
     variant: str
     aoi_geojson: dict
     species_profiles: dict
-    grid_wh: str
     time_source: str
     temporal_spec: dict
 
@@ -154,11 +158,18 @@ def _read_existing_provenance(run_root: Path, variant: str, species_names: Seque
 
 
 def build_and_write_bundle(ctx: RunContext, time_ids: Sequence[str]) -> str:
-    width, height = [int(x) for x in ctx.grid_wh.lower().split("x")]
     bbox = bbox_from_geojson(ctx.aoi_geojson)
-    grid = GridSpec(lon_min=bbox[0], lat_min=bbox[1], lon_max=bbox[2], lat_max=bbox[3], width=width, height=height)
-    mask = mask_from_geojson(ctx.aoi_geojson, grid)
     datasets_cfg = load_datasets_config().get("cmems", {})
+
+    reference_time_iso = iso_from_time_id(time_ids[0]) if time_ids else datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    reference_time_dt = datetime.fromisoformat(reference_time_iso.replace("Z", "+00:00"))
+    grid, grid_source = resolve_reference_grid(
+        aoi_geojson=ctx.aoi_geojson,
+        target_time_utc=reference_time_dt,
+        datasets_cfg=datasets_cfg,
+    )
+    width, height = grid.width, grid.height
+    mask = mask_from_geojson(ctx.aoi_geojson, grid)
 
     run_root = ctx.out_root / "runs" / ctx.run_id
     run_root.mkdir(parents=True, exist_ok=True)
@@ -233,6 +244,7 @@ def build_and_write_bundle(ctx: RunContext, time_ids: Sequence[str]) -> str:
                 }
             },
             "time_entries": per_species_time_entries[species_name],
+            "grid": {"width": width, "height": height, "crs": grid.crs, "source": grid_source},
         }
         meta_path = run_root / "variants" / ctx.variant / "species" / species_name / "meta.json"
         write_json(meta_path, species_meta)
@@ -247,7 +259,7 @@ def build_and_write_bundle(ctx: RunContext, time_ids: Sequence[str]) -> str:
         "variant": ctx.variant,
         "species": species_names,
         "bbox": list(bbox),
-        "grid": {"width": width, "height": height, "crs": grid.crs},
+        "grid": {"width": width, "height": height, "crs": grid.crs, "source": grid_source},
         "aoi": ctx.aoi_geojson,
         "temporal_spec": ctx.temporal_spec,
         "data_mode": "real_copernicus_environmental_layers",
@@ -279,7 +291,7 @@ def build_and_write_bundle(ctx: RunContext, time_ids: Sequence[str]) -> str:
         "variant": ctx.variant,
         "time_source": ctx.time_source,
         "latest_available_time_id": list(time_ids)[-1] if time_ids else None,
-        "grid": {"width": width, "height": height, "crs": grid.crs},
+        "grid": {"width": width, "height": height, "crs": grid.crs, "source": grid_source},
         "bbox": list(bbox),
         "aoi": ctx.aoi_geojson,
         "species": species_names,
