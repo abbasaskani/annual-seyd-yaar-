@@ -17,11 +17,18 @@ class OceanDataError(RuntimeError):
     pass
 
 
+class DatasetCandidateRejected(RuntimeError):
+    def __init__(self, dataset_id: str, message: str, *, original_exc: Exception | None = None) -> None:
+        super().__init__(message)
+        self.dataset_id = dataset_id
+        self.original_exc = original_exc
+
+
 def _require_modules():
     try:
         import copernicusmarine  # type: ignore
         import xarray as xr  # type: ignore
-    except Exception as exc:  # pragma: no cover - depends on runtime env
+    except Exception as exc:  # pragma: no cover - runtime dependent
         raise OceanDataError(
             "Real Copernicus Marine access requires 'copernicusmarine' and 'xarray'. "
             "Install backend/requirements.txt and configure Copernicus credentials first."
@@ -36,6 +43,20 @@ def load_datasets_config(config_path: Path | None = None) -> dict:
 
 def _format_iso_z(stamp: dt.datetime) -> str:
     return stamp.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_optional_datetime(value: object) -> dt.datetime | None:
+    if value in (None, "", "null"):
+        return None
+    text = str(value)
+    if len(text) == 10 and text.count("-") == 2:
+        text = f"{text}T00:00:00+00:00"
+    else:
+        text = text.replace("Z", "+00:00")
+    stamp = dt.datetime.fromisoformat(text)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp.astimezone(dt.timezone.utc)
 
 
 def _coord_name(candidates: Sequence[str], available: Iterable[str]) -> str | None:
@@ -65,92 +86,97 @@ def _lon_coord_name(ds) -> str:
 
 
 def _depth_coord_name(ds) -> str | None:
-    return _coord_name(("depth", "deptho", "lev", "z"), list(ds.coords) + list(ds.dims))
+    return _coord_name(("depth", "depthu", "depthv", "lev", "z"), list(ds.coords) + list(ds.dims))
 
 
-def _normalize_longitudes(lons: np.ndarray, target_lons: np.ndarray) -> np.ndarray:
-    arr = np.asarray(lons, dtype=np.float64).copy()
-    tgt_min = float(np.nanmin(target_lons))
-    tgt_max = float(np.nanmax(target_lons))
-    if tgt_min >= 0.0 and np.nanmin(arr) < 0.0:
-        arr = np.where(arr < 0.0, arr + 360.0, arr)
-    elif tgt_max <= 180.0 and np.nanmax(arr) > 180.0:
+def _normalize_longitudes(values: np.ndarray, reference_range: np.ndarray | None = None) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64).copy()
+    if arr.size == 0:
+        return arr
+    if reference_range is not None and reference_range.size:
+        ref_min = float(np.nanmin(reference_range))
+        ref_max = float(np.nanmax(reference_range))
+        if ref_min < 0.0 and np.nanmin(arr) >= 0.0:
+            arr = np.where(arr > 180.0, arr - 360.0, arr)
+        elif ref_max > 180.0 and np.nanmax(arr) <= 180.0:
+            arr = np.where(arr < 0.0, arr + 360.0, arr)
+    elif np.nanmax(arr) > 180.0:
         arr = np.where(arr > 180.0, arr - 360.0, arr)
     return arr
 
 
-def _nearest_index_1d(sorted_values: np.ndarray, targets: np.ndarray) -> np.ndarray:
-    if sorted_values.ndim != 1:
-        raise OceanDataError("Nearest-index helper expects 1D coordinates")
-    if sorted_values.size == 1:
-        return np.zeros_like(targets, dtype=np.int64)
-    mids = (sorted_values[:-1] + sorted_values[1:]) / 2.0
-    return np.searchsorted(mids, targets).astype(np.int64)
+def _nearest_index(sorted_values: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    idx = np.searchsorted(sorted_values, targets)
+    idx = np.clip(idx, 0, len(sorted_values) - 1)
+    prev_idx = np.clip(idx - 1, 0, len(sorted_values) - 1)
+    next_idx = idx
+    prev_dist = np.abs(sorted_values[prev_idx] - targets)
+    next_dist = np.abs(sorted_values[next_idx] - targets)
+    return np.where(prev_dist <= next_dist, prev_idx, next_idx)
 
 
 def _resample_2d_nearest(values: np.ndarray, src_lats: np.ndarray, src_lons: np.ndarray, grid: GridSpec) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float32)
+    data = np.asarray(values, dtype=np.float32)
     lats = np.asarray(src_lats, dtype=np.float64)
     lons = np.asarray(src_lons, dtype=np.float64)
 
-    lon2d, lat2d = grid.lonlat_mesh()
-    lons = _normalize_longitudes(lons, lon2d)
+    if data.ndim != 2:
+        raise OceanDataError(f"Expected a 2D field for resampling, got ndim={data.ndim}")
+    if lats.ndim != 1 or lons.ndim != 1:
+        raise OceanDataError(
+            f"Expected 1D lat/lon coordinates for resampling, got lat_ndim={lats.ndim}, lon_ndim={lons.ndim}"
+        )
+
+    lons = _normalize_longitudes(lons, np.asarray([grid.lon_min, grid.lon_max], dtype=np.float64))
 
     lon_order = np.argsort(lons)
     lat_order = np.argsort(lats)
-    lons = lons[lon_order]
-    lats = lats[lat_order]
-    arr = arr[np.ix_(lat_order, lon_order)]
+    lons_sorted = lons[lon_order]
+    lats_sorted = lats[lat_order]
+    data_sorted = data[np.ix_(lat_order, lon_order)]
 
-    lat_idx = np.clip(_nearest_index_1d(lats, lat2d), 0, len(lats) - 1)
-    lon_idx = np.clip(_nearest_index_1d(lons, lon2d), 0, len(lons) - 1)
-    out = arr[lat_idx, lon_idx]
-    return np.asarray(out, dtype=np.float32)
+    tgt_lons = np.linspace(grid.lon_min, grid.lon_max, grid.width, dtype=np.float64)
+    tgt_lats = np.linspace(grid.lat_max, grid.lat_min, grid.height, dtype=np.float64)
+
+    lon_idx = _nearest_index(lons_sorted, tgt_lons)
+    lat_idx = _nearest_index(lats_sorted, tgt_lats)
+    return data_sorted[np.ix_(lat_idx, lon_idx)].astype(np.float32)
 
 
-def _select_variable_2d(ds, variable_name: str, *, target_time_utc: dt.datetime, depth_target_m: float | None):
-    if variable_name not in ds.data_vars:
-        raise OceanDataError(f"Variable '{variable_name}' not found in dataset vars={list(ds.data_vars)}")
+def _select_variable_2d(ds, var_name: str, *, target_time_utc: dt.datetime, depth_target_m: float | None):
+    if var_name not in ds:
+        raise OceanDataError(f"Variable '{var_name}' not found in dataset variables={list(ds.data_vars)}")
 
-    da = ds[variable_name]
+    da = ds[var_name]
     actual_time_utc: str | None = None
     actual_depth_m: float | None = None
 
     time_name = _time_coord_name(da)
-    if time_name and time_name in da.coords and da.sizes.get(time_name, 0) > 0:
-        picked = da.sel({time_name: np.datetime64(target_time_utc.astimezone(dt.timezone.utc).replace(tzinfo=None))}, method="nearest")
+    if time_name and time_name in da.coords:
         try:
-            actual_np = picked.coords[time_name].values
-            actual_time = dt.datetime.fromisoformat(np.datetime_as_string(actual_np, timezone="UTC").replace("Z", "+00:00"))
-            actual_time_utc = _format_iso_z(actual_time)
-        except Exception:
-            actual_time_utc = None
-        da = picked
+            da = da.sel({time_name: target_time_utc}, method="nearest")
+            actual_time_raw = da.coords[time_name].values.item()
+            actual_time = np.datetime64(actual_time_raw).astype("datetime64[ns]").tolist()
+            if isinstance(actual_time, dt.datetime):
+                if actual_time.tzinfo is None:
+                    actual_time = actual_time.replace(tzinfo=dt.timezone.utc)
+                actual_time_utc = actual_time.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception as exc:
+            raise OceanDataError(f"Could not select nearest time for variable '{var_name}'") from exc
 
     depth_name = _depth_coord_name(da)
-    if depth_name and depth_name in da.coords and da.sizes.get(depth_name, 0) > 0 and depth_target_m is not None:
-        picked = da.sel({depth_name: float(depth_target_m)}, method="nearest")
+    if depth_name and depth_name in da.coords and depth_target_m is not None:
         try:
-            actual_depth_m = float(np.asarray(picked.coords[depth_name].values).item())
-        except Exception:
-            actual_depth_m = None
-        da = picked
+            da = da.sel({depth_name: float(depth_target_m)}, method="nearest")
+            actual_depth_m = float(np.asarray(da.coords[depth_name].values).squeeze())
+        except Exception as exc:
+            raise OceanDataError(f"Could not select nearest depth for variable '{var_name}'") from exc
 
     da = da.squeeze(drop=True)
     lat_name = _lat_coord_name(da)
     lon_name = _lon_coord_name(da)
-    non_spatial_dims = [d for d in da.dims if d not in {lat_name, lon_name}]
-    for d in list(non_spatial_dims):
-        if da.sizes.get(d, 0) == 1:
-            da = da.isel({d: 0}, drop=True)
-    non_spatial_dims = [d for d in da.dims if d not in {lat_name, lon_name}]
-    if non_spatial_dims:
-        raise OceanDataError(
-            f"Variable '{variable_name}' still has unexpected non-spatial dims {non_spatial_dims}; "
-            "refine dataset-specific selection before running."
-        )
-
-    da = da.transpose(lat_name, lon_name)
+    if da.ndim != 2:
+        raise OceanDataError(f"Variable '{var_name}' did not resolve to 2D after time/depth selection; ndim={da.ndim}")
     return da, lat_name, lon_name, actual_time_utc, actual_depth_m
 
 
@@ -186,6 +212,63 @@ def _dataset_cache_path(*, dataset_id: str, variables: list[str], bbox: tuple[fl
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
     safe_dataset = dataset_id.replace("/", "_")
     return _cache_root() / safe_dataset / f"{digest}.nc"
+
+
+NON_RETRYABLE_MARKERS = (
+    "coordinatesoutofdatasetbounds",
+    "exceed the dataset coordinates",
+    "outside dataset coverage",
+    "no candidate dataset covers",
+    "no overlapping data",
+)
+
+
+def _is_non_retryable_error(exc: Exception) -> bool:
+    text = f"{exc.__class__.__name__}: {exc}".lower()
+    return any(marker in text for marker in NON_RETRYABLE_MARKERS)
+
+
+def _iter_layer_candidates(logical_name: str, item: Mapping[str, object]) -> list[dict[str, object]]:
+    base = {k: v for k, v in item.items() if k != "candidates"}
+    raw_candidates = item.get("candidates")
+    if not raw_candidates:
+        return [base]
+    if not isinstance(raw_candidates, Sequence):
+        raise OceanDataError(f"Dataset config for '{logical_name}' has a non-list 'candidates' field")
+    out: list[dict[str, object]] = []
+    for idx, raw in enumerate(raw_candidates):
+        if not isinstance(raw, Mapping):
+            raise OceanDataError(f"Dataset candidate #{idx + 1} for '{logical_name}' must be a mapping")
+        merged = dict(base)
+        merged.pop("dataset_id", None)
+        merged.pop("variable", None)
+        merged.pop("variables", None)
+        merged.update(raw)
+        out.append(merged)
+    return out
+
+
+def _candidate_variables(candidate: Mapping[str, object], logical_name: str) -> list[str]:
+    variables = list(candidate.get("variables") or ([candidate["variable"]] if candidate.get("variable") else []))
+    if not variables:
+        raise OceanDataError(f"Dataset config for '{logical_name}' has no variable(s)")
+    return [str(v) for v in variables]
+
+
+def _candidate_covers_time(candidate: Mapping[str, object], target_time_utc: dt.datetime) -> bool:
+    start = _parse_optional_datetime(candidate.get("coverage_start"))
+    end = _parse_optional_datetime(candidate.get("coverage_end"))
+    if start and target_time_utc < start:
+        return False
+    if end and target_time_utc > end:
+        return False
+    return True
+
+
+def _candidate_desc(candidate: Mapping[str, object]) -> str:
+    dataset_id = str(candidate.get("dataset_id", "<missing-dataset-id>"))
+    label = str(candidate.get("label", "")).strip()
+    return f"{label} ({dataset_id})" if label else dataset_id
 
 
 def _download_subset_to_cache(*, dataset_id: str, variables: list[str], bbox: tuple[float, float, float, float], target_time_utc: dt.datetime, depth_target_m: float | None) -> tuple[Path, bool, int]:
@@ -232,16 +315,18 @@ def _download_subset_to_cache(*, dataset_id: str, variables: list[str], bbox: tu
             if not path.exists() or path.stat().st_size <= 0:
                 raise OceanDataError(f"Subset reported success but cache file is missing or empty: {path}")
             return path, False, attempt
-        except Exception as exc:  # pragma: no cover - network/runtime dependent
+        except Exception as exc:  # pragma: no cover - runtime dependent
             last_exc = exc
-            if path.exists() and path.stat().st_size == 0:
-                try:
-                    path.unlink()
-                except Exception:
-                    pass
+            if _is_non_retryable_error(exc):
+                raise DatasetCandidateRejected(
+                    dataset_id,
+                    f"Dataset '{dataset_id}' rejected for requested time window: {exc}",
+                    original_exc=exc,
+                ) from exc
             if attempt >= attempts:
                 break
             time.sleep(base_sleep * (2 ** (attempt - 1)))
+
     raise OceanDataError(
         f"Failed to download Copernicus subset for dataset '{dataset_id}' after {attempts} attempts."
     ) from last_exc
@@ -253,6 +338,39 @@ def _open_cached_dataset(path: Path):
         return xr.open_dataset(path)
     except Exception as exc:  # pragma: no cover - runtime dependent
         raise OceanDataError(f"Could not open cached NetCDF subset: {path}") from exc
+
+
+def _resolve_candidate_for_grid(*, logical_name: str, item: Mapping[str, object], bbox: tuple[float, float, float, float], target_time_utc: dt.datetime):
+    failures: list[str] = []
+    for idx, candidate in enumerate(_iter_layer_candidates(logical_name, item), start=1):
+        dataset_id = str(candidate.get("dataset_id", "")).strip()
+        if not dataset_id:
+            failures.append(f"candidate #{idx} for '{logical_name}' has no dataset_id")
+            continue
+        if not _candidate_covers_time(candidate, target_time_utc):
+            failures.append(f"candidate #{idx} {_candidate_desc(candidate)} skipped: requested time outside declared coverage")
+            continue
+        variables = _candidate_variables(candidate, logical_name)
+        depth_target_m = candidate.get("depth_target_m")
+        try:
+            cache_path, cache_hit, retry_attempts_used = _download_subset_to_cache(
+                dataset_id=dataset_id,
+                variables=variables,
+                bbox=bbox,
+                target_time_utc=target_time_utc,
+                depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
+            )
+            return candidate, variables, cache_path, cache_hit, retry_attempts_used
+        except DatasetCandidateRejected as exc:
+            failures.append(str(exc))
+            continue
+        except OceanDataError as exc:
+            failures.append(str(exc))
+            continue
+    raise OceanDataError(
+        f"No candidate dataset covers the requested time {target_time_utc.isoformat()} for layer '{logical_name}'. "
+        f"Tried: {' | '.join(failures) if failures else 'no valid candidates'}"
+    )
 
 
 def resolve_reference_grid(
@@ -271,20 +389,16 @@ def resolve_reference_grid(
     if not item or not isinstance(item, Mapping):
         raise OceanDataError(f"Missing dataset config for reference grid layer '{logical_name}'")
 
-    variables = list(item.get("variables") or ([item["variable"]] if item.get("variable") else []))
-    if not variables:
-        raise OceanDataError(f"Dataset config for reference grid layer '{logical_name}' has no variable(s)")
-
     bbox = bbox_from_geojson(aoi_geojson)
-    dataset_id = str(item["dataset_id"])
-    depth_target_m = item.get("depth_target_m")
-    cache_path, cache_hit, retry_attempts_used = _download_subset_to_cache(
-        dataset_id=dataset_id,
-        variables=variables,
+    candidate, variables, cache_path, cache_hit, retry_attempts_used = _resolve_candidate_for_grid(
+        logical_name=logical_name,
+        item=item,
         bbox=bbox,
         target_time_utc=target_time_utc,
-        depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
     )
+    dataset_id = str(candidate["dataset_id"])
+    depth_target_m = candidate.get("depth_target_m")
+
     ds = _open_cached_dataset(cache_path)
     try:
         var_name = variables[0]
@@ -298,7 +412,8 @@ def resolve_reference_grid(
         src_lons = np.asarray(da[lon_name].values, dtype=np.float64)
         if src_lats.ndim != 1 or src_lons.ndim != 1:
             raise OceanDataError(
-                f"Reference grid layer '{logical_name}' must expose 1D lat/lon coordinates; got lat_ndim={src_lats.ndim}, lon_ndim={src_lons.ndim}"
+                f"Reference grid layer '{logical_name}' must expose 1D lat/lon coordinates; "
+                f"got lat_ndim={src_lats.ndim}, lon_ndim={src_lons.ndim}"
             )
         src_lons = _normalize_longitudes(src_lons, np.asarray([bbox[0], bbox[2]], dtype=np.float64))
         grid = GridSpec(
@@ -312,6 +427,7 @@ def resolve_reference_grid(
         provenance = {
             "logical_name": logical_name,
             "dataset_id": dataset_id,
+            "candidate_label": candidate.get("label"),
             "variable": var_name,
             "actual_time_utc": actual_time_utc,
             "actual_depth_m": actual_depth_m,
@@ -330,6 +446,76 @@ def resolve_reference_grid(
             pass
 
 
+def _fetch_layer_from_candidates(*, logical_name: str, item: Mapping[str, object], bbox: tuple[float, float, float, float], target_time_utc: dt.datetime, grid: GridSpec) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    failures: list[str] = []
+    for idx, candidate in enumerate(_iter_layer_candidates(logical_name, item), start=1):
+        dataset_id = str(candidate.get("dataset_id", "")).strip()
+        if not dataset_id:
+            failures.append(f"candidate #{idx} for '{logical_name}' has no dataset_id")
+            continue
+        if not _candidate_covers_time(candidate, target_time_utc):
+            failures.append(f"candidate #{idx} {_candidate_desc(candidate)} skipped: requested time outside declared coverage")
+            continue
+        variables = _candidate_variables(candidate, logical_name)
+        depth_target_m = candidate.get("depth_target_m")
+        try:
+            cache_path, cache_hit, retry_attempts_used = _download_subset_to_cache(
+                dataset_id=dataset_id,
+                variables=variables,
+                bbox=bbox,
+                target_time_utc=target_time_utc,
+                depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
+            )
+            ds = _open_cached_dataset(cache_path)
+            try:
+                loaded: dict[str, np.ndarray] = {}
+                used_time: str | None = None
+                used_depth: float | None = None
+                for var_name in variables:
+                    da, lat_name, lon_name, actual_time_utc, actual_depth_m = _select_variable_2d(
+                        ds,
+                        var_name,
+                        target_time_utc=target_time_utc,
+                        depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
+                    )
+                    loaded[var_name] = _resample_2d_nearest(
+                        np.asarray(da.values, dtype=np.float32),
+                        np.asarray(da[lat_name].values, dtype=np.float64),
+                        np.asarray(da[lon_name].values, dtype=np.float64),
+                        grid,
+                    )
+                    if actual_time_utc:
+                        used_time = actual_time_utc
+                    if actual_depth_m is not None:
+                        used_depth = actual_depth_m
+            finally:
+                try:
+                    ds.close()
+                except Exception:
+                    pass
+            provenance = {
+                "dataset_id": dataset_id,
+                "candidate_label": candidate.get("label"),
+                "variables": variables,
+                "actual_time_utc": used_time,
+                "actual_depth_m": used_depth,
+                "cache_path": str(cache_path).replace("\\", "/"),
+                "cache_hit": bool(cache_hit),
+                "retry_attempts_used": int(retry_attempts_used),
+            }
+            return loaded, provenance
+        except DatasetCandidateRejected as exc:
+            failures.append(str(exc))
+            continue
+        except OceanDataError as exc:
+            failures.append(str(exc))
+            continue
+    raise OceanDataError(
+        f"No candidate dataset covers the requested time {target_time_utc.isoformat()} for layer '{logical_name}'. "
+        f"Tried: {' | '.join(failures) if failures else 'no valid candidates'}"
+    )
+
+
 def fetch_environment_fields(
     *,
     aoi_geojson: dict,
@@ -342,7 +528,7 @@ def fetch_environment_fields(
         raise OceanDataError("No Copernicus datasets were configured in backend/config/datasets.json")
 
     bbox = bbox_from_geojson(aoi_geojson)
-    output: dict[str, np.ndarray] = {}
+    raw_output: dict[str, np.ndarray] = {}
     provenance: dict[str, dict[str, object]] = {}
 
     for logical_name in ("sst", "currents", "ssh", "waves", "chl"):
@@ -351,68 +537,30 @@ def fetch_environment_fields(
             raise OceanDataError(f"Missing dataset config for required layer '{logical_name}'")
         if not isinstance(item, Mapping):
             raise OceanDataError(f"Dataset config for '{logical_name}' must be a mapping")
-
-        variables = list(item.get("variables") or ([item["variable"]] if item.get("variable") else []))
-        if not variables:
-            raise OceanDataError(f"Dataset config for '{logical_name}' has no variable(s)")
-
-        dataset_id = str(item["dataset_id"])
-        depth_target_m = item.get("depth_target_m")
-        cache_path, cache_hit, retry_attempts_used = _download_subset_to_cache(
-            dataset_id=dataset_id,
-            variables=variables,
+        loaded, layer_provenance = _fetch_layer_from_candidates(
+            logical_name=logical_name,
+            item=item,
             bbox=bbox,
             target_time_utc=target_time_utc,
-            depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
+            grid=grid,
         )
-        ds = _open_cached_dataset(cache_path)
+        raw_output.update(loaded)
+        provenance[logical_name] = layer_provenance
 
-        used_time: str | None = None
-        used_depth: float | None = None
-        for var_name in variables:
-            da, lat_name, lon_name, actual_time_utc, actual_depth_m = _select_variable_2d(
-                ds,
-                var_name,
-                target_time_utc=target_time_utc,
-                depth_target_m=float(depth_target_m) if depth_target_m is not None else None,
-            )
-            resampled = _resample_2d_nearest(
-                np.asarray(da.values, dtype=np.float32),
-                np.asarray(da[lat_name].values, dtype=np.float64),
-                np.asarray(da[lon_name].values, dtype=np.float64),
-                grid,
-            )
-            output[var_name] = resampled
-            if actual_time_utc:
-                used_time = actual_time_utc
-            if actual_depth_m is not None:
-                used_depth = actual_depth_m
-
-        try:
-            ds.close()
-        except Exception:
-            pass
-
-        provenance[logical_name] = {
-            "dataset_id": dataset_id,
-            "variables": variables,
-            "actual_time_utc": used_time,
-            "actual_depth_m": used_depth,
-            "cache_path": str(cache_path).replace("\\", "/"),
-            "cache_hit": bool(cache_hit),
-            "retry_attempts_used": int(retry_attempts_used),
-        }
-
-    if "uo" not in output or "vo" not in output:
+    if "uo" not in raw_output or "vo" not in raw_output:
         raise OceanDataError("Current components uo/vo were not loaded from the configured currents dataset")
 
+    missing = [k for k in ("thetao", "chl", "zos", "VHM0") if k not in raw_output]
+    if missing:
+        raise OceanDataError(f"Missing required variables after dataset loading: {missing}")
+
     derived = {
-        "sst": np.asarray(output["thetao"], dtype=np.float32),
-        "chl": np.asarray(output["chl"], dtype=np.float32),
-        "ssh": np.asarray(output["zos"], dtype=np.float32),
-        "waves": np.asarray(output["VHM0"], dtype=np.float32),
-        "u": np.asarray(output["uo"], dtype=np.float32),
-        "v": np.asarray(output["vo"], dtype=np.float32),
+        "sst": np.asarray(raw_output["thetao"], dtype=np.float32),
+        "chl": np.asarray(raw_output["chl"], dtype=np.float32),
+        "ssh": np.asarray(raw_output["zos"], dtype=np.float32),
+        "waves": np.asarray(raw_output["VHM0"], dtype=np.float32),
+        "u": np.asarray(raw_output["uo"], dtype=np.float32),
+        "v": np.asarray(raw_output["vo"], dtype=np.float32),
     }
     derived["current_speed"] = np.sqrt(np.square(derived["u"]) + np.square(derived["v"])).astype(np.float32)
     return derived, provenance
